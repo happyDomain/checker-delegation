@@ -1,5 +1,5 @@
-git.happydns.org/checker-sdk-go v1.4.0 h1:sO8EnF3suhNgYLRsbmCZWJOymH/oNMrOUqj3FEzJArs=
-git.happydns.org/checker-sdk-go v1.4.0/go.mod h1:aNAcfYFfbhvH9kJhE0Njp5GX0dQbxdRB0rJ0KvSC5nI=
+git.happydns.org/checker-sdk-go v1.5.0 h1:5uD5Cm6xJ+lwnhbJ09iCXGHbYS9zRh+Yh0NeBHkAPBY=
+git.happydns.org/checker-sdk-go v1.5.0/go.mod h1:aNAcfYFfbhvH9kJhE0Njp5GX0dQbxdRB0rJ0KvSC5nI=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 github.com/miekg/dns v1.1.72 h1:vhmr+TF2A3tuoGNkLDFK9zi36F2LS+hKTRW0Uf8kbzI=

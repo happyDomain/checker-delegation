@@ -3,7 +3,7 @@ module git.happydns.org/checker-delegation
 go 1.25.0
 
 require (
-	git.happydns.org/checker-sdk-go v1.4.0
+	git.happydns.org/checker-sdk-go v1.5.0
 	github.com/miekg/dns v1.1.72
 )
 
