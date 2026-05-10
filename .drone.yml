@@ -1,0 +1,187 @@
+---
+kind: pipeline
+type: docker
+name: build-amd64
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+  - name: checker build
+    image: golang:1-alpine
+    commands:
+      - apk add --no-cache git make
+      - make
+    environment:
+      CHECKER_VERSION: "${DRONE_BRANCH}-${DRONE_COMMIT}"
+      CGO_ENABLED: 0
+    when:
+      event:
+        exclude:
+          - tag
+
+  - name: checker build tag
+    image: golang:1-alpine
+    commands:
+      - apk add --no-cache git make
+      - make
+    environment:
+      CHECKER_VERSION: "${DRONE_SEMVER}"
+      CGO_ENABLED: 0
+    when:
+      event:
+        - tag
+
+  - name: publish on Docker Hub
+    image: plugins/docker
+    settings:
+      repo: happydomain/checker-delegation
+      auto_tag: true
+      auto_tag_suffix: ${DRONE_STAGE_OS}-${DRONE_STAGE_ARCH}
+      dockerfile: Dockerfile
+      build_args:
+        - CHECKER_VERSION=${DRONE_BRANCH}-${DRONE_COMMIT}
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      event:
+        exclude:
+          - tag
+
+  - name: publish on Docker Hub (tag)
+    image: plugins/docker
+    settings:
+      repo: happydomain/checker-delegation
+      auto_tag: true
+      auto_tag_suffix: ${DRONE_STAGE_OS}-${DRONE_STAGE_ARCH}
+      dockerfile: Dockerfile
+      build_args:
+        - CHECKER_VERSION=${DRONE_SEMVER}
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      event:
+        - tag
+
+trigger:
+  branch:
+    exclude:
+      - renovate/*
+  event:
+    - cron
+    - push
+    - tag
+
+---
+kind: pipeline
+type: docker
+name: build-arm64
+
+platform:
+  os: linux
+  arch: arm64
+
+steps:
+  - name: checker build
+    image: golang:1-alpine
+    commands:
+      - apk add --no-cache git make
+      - make
+    environment:
+      CHECKER_VERSION: "${DRONE_BRANCH}-${DRONE_COMMIT}"
+      CGO_ENABLED: 0
+    when:
+      event:
+        exclude:
+          - tag
+
+  - name: checker build tag
+    image: golang:1-alpine
+    commands:
+      - apk add --no-cache git make
+      - make
+    environment:
+      CHECKER_VERSION: "${DRONE_SEMVER}"
+      CGO_ENABLED: 0
+    when:
+      event:
+        - tag
+
+  - name: publish on Docker Hub
+    image: plugins/docker
+    settings:
+      repo: happydomain/checker-delegation
+      auto_tag: true
+      auto_tag_suffix: ${DRONE_STAGE_OS}-${DRONE_STAGE_ARCH}
+      dockerfile: Dockerfile
+      build_args:
+        - CHECKER_VERSION=${DRONE_BRANCH}-${DRONE_COMMIT}
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      event:
+        exclude:
+          - tag
+
+  - name: publish on Docker Hub (tag)
+    image: plugins/docker
+    settings:
+      repo: happydomain/checker-delegation
+      auto_tag: true
+      auto_tag_suffix: ${DRONE_STAGE_OS}-${DRONE_STAGE_ARCH}
+      dockerfile: Dockerfile
+      build_args:
+        - CHECKER_VERSION=${DRONE_SEMVER}
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      event:
+        - tag
+
+trigger:
+  event:
+    - cron
+    - push
+    - tag
+
+---
+kind: pipeline
+name: docker-manifest
+
+platform:
+  os: linux
+  arch: arm64
+
+steps:
+  - name: publish on Docker Hub
+    image: plugins/manifest
+    settings:
+      auto_tag: true
+      ignore_missing: true
+      spec: .drone-manifest.yml
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+
+trigger:
+  branch:
+    exclude:
+      - renovate/*
+  event:
+    - cron
+    - push
+    - tag
+
+depends_on:
+  - build-amd64
+  - build-arm64
