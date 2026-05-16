@@ -89,13 +89,7 @@ func (p *delegationProvider) Collect(ctx context.Context, opts sdk.CheckerOption
 	}
 
 	// If no parent answered with an NS RRset, skip Phase B; rules flag the gap.
-	var primary *ParentView
-	for i := range data.ParentViews {
-		if data.ParentViews[i].UDPNSError == "" && len(data.ParentViews[i].NS) > 0 {
-			primary = &data.ParentViews[i]
-			break
-		}
-	}
+	primary := primaryParentView(data.ParentViews)
 	if primary == nil {
 		return data, nil
 	}
