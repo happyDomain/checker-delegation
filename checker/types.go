@@ -32,6 +32,8 @@ type ParentView struct {
 	UDPNSError   string               `json:"udp_ns_error,omitempty"`
 	TCPNSError   string               `json:"tcp_ns_error,omitempty"`
 	NS           []string             `json:"ns,omitempty"`
+	NSTTLKnown   bool                 `json:"ns_ttl_known,omitempty"`
+	NSTTL        uint32               `json:"ns_ttl,omitempty"`
 	Glue         map[string][]string  `json:"glue,omitempty"`
 	DSQueryError string               `json:"ds_query_error,omitempty"`
 	DS           []DSRecord           `json:"ds,omitempty"`
@@ -40,6 +42,7 @@ type ParentView struct {
 
 type ChildNSView struct {
 	NSName       string             `json:"ns_name"`
+	CNAMETarget  string             `json:"cname_target,omitempty"`
 	ResolveError string             `json:"resolve_error,omitempty"`
 	Addresses    []ChildAddressView `json:"addresses,omitempty"`
 }

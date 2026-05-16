@@ -108,15 +108,16 @@ func resolveZoneNSAddrs(ctx context.Context, zone string) ([]string, error) {
 
 // queryDelegation expects a referral response (no RD) and pulls NS + glue
 // from every section so misconfigured parents (NS in Answer) still parse.
-func queryDelegation(ctx context.Context, parentServer, fqdn string) (ns []string, glue map[string][]string, msg *dns.Msg, err error) {
+// nsTTL is the TTL of the first matching NS record (all RRset members share it).
+func queryDelegation(ctx context.Context, parentServer, fqdn string) (ns []string, glue map[string][]string, nsTTL uint32, nsTTLKnown bool, err error) {
 	q := dns.Question{Name: dns.Fqdn(fqdn), Qtype: dns.TypeNS, Qclass: dns.ClassINET}
 
-	msg, err = dnsExchange(ctx, "", parentServer, q, true)
-	if err != nil {
-		return nil, nil, nil, err
+	msg, merr := dnsExchange(ctx, "", parentServer, q, true)
+	if merr != nil {
+		return nil, nil, 0, false, merr
 	}
 	if msg.Rcode != dns.RcodeSuccess {
-		return nil, nil, msg, fmt.Errorf("parent answered %s", dns.RcodeToString[msg.Rcode])
+		return nil, nil, 0, false, fmt.Errorf("parent answered %s", dns.RcodeToString[msg.Rcode])
 	}
 
 	glue = map[string][]string{}
@@ -127,6 +128,10 @@ func queryDelegation(ctx context.Context, parentServer, fqdn string) (ns []strin
 			case *dns.NS:
 				if strings.EqualFold(strings.TrimSuffix(t.Header().Name, "."), strings.TrimSuffix(fqdn, ".")) {
 					ns = append(ns, strings.ToLower(dns.Fqdn(t.Ns)))
+					if !nsTTLKnown {
+						nsTTL = t.Header().Ttl
+						nsTTLKnown = true
+					}
 				}
 			case *dns.A:
 				name := strings.ToLower(dns.Fqdn(t.Header().Name))
@@ -141,6 +146,20 @@ func queryDelegation(ctx context.Context, parentServer, fqdn string) (ns []strin
 	collect(msg.Ns)
 	collect(msg.Extra)
 	return
+}
+
+// queryCNAMETarget returns the CNAME target if host is an alias, or empty
+// string if it is not. Uses the system resolver, consistent with resolveHost.
+func queryCNAMETarget(ctx context.Context, host string) (string, error) {
+	var resolver net.Resolver
+	canon, err := resolver.LookupCNAME(ctx, strings.TrimSuffix(host, "."))
+	if err != nil {
+		return "", err
+	}
+	if strings.EqualFold(dns.Fqdn(canon), dns.Fqdn(host)) {
+		return "", nil
+	}
+	return strings.TrimSuffix(dns.Fqdn(canon), "."), nil
 }
 
 // queryDS uses TCP because DS+RRSIG answers commonly exceed UDP MTU.

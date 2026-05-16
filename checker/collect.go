@@ -58,12 +58,14 @@ func (p *delegationProvider) Collect(ctx context.Context, opts sdk.CheckerOption
 	for _, ps := range parentServers {
 		view := ParentView{Server: ps}
 
-		ns, glue, _, qerr := queryDelegation(ctx, ps, delegatedFQDN)
+		ns, glue, nsTTL, nsTTLKnown, qerr := queryDelegation(ctx, ps, delegatedFQDN)
 		if qerr != nil {
 			view.UDPNSError = qerr.Error()
 		} else {
 			view.NS = ns
 			view.Glue = glue
+			view.NSTTL = nsTTL
+			view.NSTTLKnown = nsTTLKnown
 		}
 
 		if terr := queryDelegationTCP(ctx, ps, delegatedFQDN); terr != nil {
@@ -97,6 +99,11 @@ func (p *delegationProvider) Collect(ctx context.Context, opts sdk.CheckerOption
 	// Phase B: per-child observations, seeded only from parent data.
 	for _, nsName := range primary.NS {
 		child := ChildNSView{NSName: nsName}
+
+		if target, cerr := queryCNAMETarget(ctx, nsName); cerr == nil && target != "" {
+			child.CNAMETarget = target
+		}
+
 		addrs := primary.Glue[nsName]
 		if len(addrs) == 0 {
 			// Out-of-bailiwick: no glue expected, fall back to the system resolver.

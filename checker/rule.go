@@ -22,6 +22,7 @@ func Rules() []sdk.CheckRule {
 		&parentTCPRule{},
 		&nsMatchesDeclaredRule{},
 		&parentNSConsistencyRule{},
+		&nsTTLConsistencyRule{},
 		&inBailiwickGlueRule{},
 		&unnecessaryGlueRule{},
 		&dsQueryRule{},
@@ -30,6 +31,7 @@ func Rules() []sdk.CheckRule {
 		&dsPresentAtParentRule{},
 		&dsRRSIGValidityRule{},
 		&nsResolvableRule{},
+		&nsTargetNotCNAMERule{},
 		&childReachableRule{},
 		&childAuthoritativeRule{},
 		&childSOASerialDriftRule{},
@@ -532,6 +534,56 @@ func rrsigReason(sig DSRRSIGObservation, now time.Time) string {
 	}
 }
 
+type nsTTLConsistencyRule struct{}
+
+func (r *nsTTLConsistencyRule) Name() string { return "delegation_ns_ttl_consistency" }
+func (r *nsTTLConsistencyRule) Description() string {
+	return "Verifies that all parent authoritative servers serve the NS RRset with the same TTL"
+}
+func (r *nsTTLConsistencyRule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_ns_ttl_inconsistent")
+	if errState != nil {
+		return errState
+	}
+	type entry struct {
+		server string
+		ttl    uint32
+	}
+	var known []entry
+	for _, v := range data.ParentViews {
+		if v.NSTTLKnown {
+			known = append(known, entry{v.Server, v.NSTTL})
+		}
+	}
+	if len(known) < 2 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_ns_ttl_inconsistent",
+			Message: "fewer than two parent servers returned an NS TTL",
+		}}
+	}
+	ref := known[0]
+	var bad []string
+	for _, e := range known[1:] {
+		if e.ttl != ref.ttl {
+			bad = append(bad, fmt.Sprintf("%s serves TTL %d (reference %d from %s)", e.server, e.ttl, ref.ttl, ref.server))
+		}
+	}
+	if len(bad) > 0 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusWarn,
+			Code:    "delegation_ns_ttl_inconsistent",
+			Message: fmt.Sprintf("NS TTL inconsistency: %s", strings.Join(bad, "; ")),
+			Meta:    map[string]any{"reference_ttl": ref.ttl, "reference_server": ref.server},
+		}}
+	}
+	return []sdk.CheckState{{
+		Status:  sdk.StatusOK,
+		Code:    "delegation_ns_ttl_inconsistent",
+		Message: fmt.Sprintf("all parent servers agree on NS TTL (%ds)", ref.ttl),
+	}}
+}
+
 // ───────────────────────── child-side rules ─────────────────────────
 
 type nsResolvableRule struct{}
@@ -566,6 +618,44 @@ func (r *nsResolvableRule) Evaluate(ctx context.Context, obs sdk.ObservationGett
 			Code:    "delegation_ns_unresolvable",
 			Message: "no out-of-bailiwick NS to resolve",
 		}}
+	}
+	return out
+}
+
+type nsTargetNotCNAMERule struct{}
+
+func (r *nsTargetNotCNAMERule) Name() string { return "delegation_ns_not_cname" }
+func (r *nsTargetNotCNAMERule) Description() string {
+	return "Verifies that NS target names are not CNAME aliases (RFC 2181 §10.3)"
+}
+func (r *nsTargetNotCNAMERule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_ns_is_cname")
+	if errState != nil {
+		return errState
+	}
+	if len(data.Children) == 0 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_ns_is_cname",
+			Message: "no NS names to check",
+		}}
+	}
+	var out []sdk.CheckState
+	for _, c := range data.Children {
+		st := sdk.CheckState{Code: "delegation_ns_is_cname", Subject: c.NSName}
+		switch {
+		case c.CNAMETarget != "":
+			st.Status = sdk.StatusCrit
+			st.Message = fmt.Sprintf("NS target is a CNAME alias to %s (RFC 2181 §10.3 forbids this)", c.CNAMETarget)
+			st.Meta = map[string]any{"cname_target": c.CNAMETarget}
+		case c.ResolveError != "":
+			st.Status = sdk.StatusUnknown
+			st.Message = fmt.Sprintf("could not verify CNAME status: %s", c.ResolveError)
+		default:
+			st.Status = sdk.StatusOK
+			st.Message = "not a CNAME"
+		}
+		out = append(out, st)
 	}
 	return out
 }
