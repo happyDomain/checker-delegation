@@ -142,22 +142,12 @@ func (p *delegationProvider) Collect(ctx context.Context, opts sdk.CheckerOption
 				av.ChildGlueAddrs = addrsAt
 			}
 
-			// DNSKEY is only useful when there's a parent DS to match against.
-			parentHasDS := false
-			for _, pv := range data.ParentViews {
-				if len(pv.DS) > 0 {
-					parentHasDS = true
-					break
-				}
-			}
-			if parentHasDS {
-				keys, kerr := queryDNSKEY(ctx, srv, delegatedFQDN)
-				if kerr != nil {
-					av.DNSKEYError = kerr.Error()
-				} else {
-					for _, k := range keys {
-						av.DNSKEYs = append(av.DNSKEYs, NewDNSKEYRecord(k))
-					}
+			keys, kerr := queryDNSKEY(ctx, srv, delegatedFQDN)
+			if kerr != nil {
+				av.DNSKEYError = kerr.Error()
+			} else {
+				for _, k := range keys {
+					av.DNSKEYs = append(av.DNSKEYs, NewDNSKEYRecord(k))
 				}
 			}
 
