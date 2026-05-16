@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -436,4 +437,724 @@ func TestLoadDataPropagatesError(t *testing.T) {
 	if len(states) != 1 || states[0].Status != sdk.StatusError {
 		t.Fatalf("want single Error state, got %+v", states)
 	}
+}
+
+// ------------------------- parentNSQueryRule -------------------------
+
+func TestParentNSQueryRule(t *testing.T) {
+	r := &parentNSQueryRule{}
+
+	t.Run("no parent views → Unknown", func(t *testing.T) {
+		states := evalRule(t, r, &DelegationData{}, nil)
+		if len(states) != 1 || states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown, got %+v", states)
+		}
+	})
+	t.Run("UDP error → Crit", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", UDPNSError: "timeout"}},
+		}
+		states := evalRule(t, r, data, nil)
+		if len(states) != 1 || states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit, got %+v", states)
+		}
+	})
+	t.Run("empty NS RRset → Crit", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", NS: []string{}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if len(states) != 1 || states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit, got %+v", states)
+		}
+	})
+	t.Run("OK when NS records returned", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", NS: []string{"ns1.example.com."}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if len(states) != 1 || states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+	t.Run("per-server subjects", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{
+				{Server: "p1:53", NS: []string{"ns1.example.com."}},
+				{Server: "p2:53", UDPNSError: "refused"},
+			},
+		}
+		states := evalRule(t, r, data, nil)
+		if len(states) != 2 {
+			t.Fatalf("want 2 states, got %d", len(states))
+		}
+		idx := statusByCode(t, states)
+		if idx["delegation_parent_query_failed|p1:53"].Status != sdk.StatusOK {
+			t.Errorf("p1: want OK")
+		}
+		if idx["delegation_parent_query_failed|p2:53"].Status != sdk.StatusCrit {
+			t.Errorf("p2: want Crit")
+		}
+	})
+}
+
+// ------------------------- parentTCPRule -------------------------
+
+func TestParentTCPRule(t *testing.T) {
+	r := &parentTCPRule{}
+
+	t.Run("no parent views → Unknown", func(t *testing.T) {
+		states := evalRule(t, r, &DelegationData{}, nil)
+		if states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown, got %+v", states)
+		}
+	})
+	t.Run("TCP error with requireTCP=true → Crit", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", TCPNSError: "refused"}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit, got %+v", states)
+		}
+	})
+	t.Run("TCP error with requireTCP=false → Warn", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", TCPNSError: "refused"}},
+		}
+		states := evalRule(t, r, data, sdk.CheckerOptions{"requireTCP": false})
+		if states[0].Status != sdk.StatusWarn {
+			t.Fatalf("want Warn, got %+v", states)
+		}
+	})
+	t.Run("no TCP error → OK", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53"}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+}
+
+// ------------------------- dsQueryRule -------------------------
+
+func TestDSQueryRule(t *testing.T) {
+	r := &dsQueryRule{}
+
+	t.Run("no parent views → Unknown", func(t *testing.T) {
+		states := evalRule(t, r, &DelegationData{}, nil)
+		if states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown, got %+v", states)
+		}
+	})
+	t.Run("DS query error → Warn", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", DSQueryError: "timeout"}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusWarn {
+			t.Fatalf("want Warn, got %+v", states)
+		}
+	})
+	t.Run("DS query OK with records", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{{KeyTag: 1, Algorithm: 8, DigestType: 2, Digest: "AAAA"}}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+	t.Run("DS query OK with empty answer", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53"}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK for NOERROR+empty, got %+v", states)
+		}
+	})
+}
+
+// ------------------------- dsMatchesDeclaredRule -------------------------
+
+func TestDSMatchesDeclaredRule(t *testing.T) {
+	r := &dsMatchesDeclaredRule{}
+	ds1 := DSRecord{KeyTag: 1, Algorithm: 8, DigestType: 2, Digest: "AAAA"}
+	ds2 := DSRecord{KeyTag: 2, Algorithm: 8, DigestType: 2, Digest: "BBBB"}
+
+	t.Run("no DS data to compare → Info", func(t *testing.T) {
+		states := evalRule(t, r, &DelegationData{}, nil)
+		if states[0].Status != sdk.StatusInfo {
+			t.Fatalf("want Info, got %+v", states)
+		}
+	})
+	t.Run("DS RRset matches declared → OK", func(t *testing.T) {
+		data := &DelegationData{
+			DeclaredDS:  []DSRecord{ds1},
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{ds1}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+	t.Run("DS missing from parent → Crit when declared non-empty", func(t *testing.T) {
+		data := &DelegationData{
+			DeclaredDS:  []DSRecord{ds1, ds2},
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{ds1}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit, got %+v", states)
+		}
+	})
+	t.Run("extra DS at parent with no declared → Warn", func(t *testing.T) {
+		data := &DelegationData{
+			DeclaredDS:  []DSRecord{},
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{ds1}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusWarn {
+			t.Fatalf("want Warn, got %+v", states)
+		}
+	})
+	t.Run("DS query error → view skipped", func(t *testing.T) {
+		data := &DelegationData{
+			DeclaredDS: []DSRecord{ds1},
+			ParentViews: []ParentView{
+				{Server: "p1:53", DSQueryError: "timeout"},
+				{Server: "p2:53", DS: []DSRecord{ds1}},
+			},
+		}
+		states := evalRule(t, r, data, nil)
+		idx := statusByCode(t, states)
+		if _, ok := idx["delegation_ds_mismatch|p1:53"]; ok {
+			t.Error("p1 with DS query error must be skipped")
+		}
+		if idx["delegation_ds_mismatch|p2:53"].Status != sdk.StatusOK {
+			t.Error("p2: want OK")
+		}
+	})
+}
+
+// ------------------------- dsPresentAtParentRule -------------------------
+
+func TestDSPresentAtParentRule(t *testing.T) {
+	r := &dsPresentAtParentRule{}
+
+	t.Run("no declared DS → Info", func(t *testing.T) {
+		states := evalRule(t, r, &DelegationData{}, nil)
+		if states[0].Status != sdk.StatusInfo {
+			t.Fatalf("want Info, got %+v", states)
+		}
+	})
+	t.Run("declared DS and parent serves DS → OK", func(t *testing.T) {
+		data := &DelegationData{
+			DeclaredDS:  []DSRecord{{KeyTag: 1, Algorithm: 8, DigestType: 2, Digest: "AAAA"}},
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{{KeyTag: 1, Algorithm: 8, DigestType: 2, Digest: "AAAA"}}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+}
+
+// ------------------------- dsRRSIGValidityRule -------------------------
+
+func nowUint32() uint32 { return uint32(time.Now().UTC().Unix()) }
+
+func TestDSRRSIGValidityRule(t *testing.T) {
+	r := &dsRRSIGValidityRule{}
+
+	t.Run("no DS RRSIGs → Info", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{{KeyTag: 1}}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusInfo {
+			t.Fatalf("want Info, got %+v", states)
+		}
+	})
+	t.Run("DS query error → view skipped", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", DSQueryError: "timeout", DSRRSIGs: []DSRRSIGObservation{{
+				Inception:  nowUint32() - 3600,
+				Expiration: nowUint32() + 86400,
+			}}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if len(states) != 1 && states[0].Status != sdk.StatusInfo {
+			t.Fatalf("view with DS query error must be skipped, got %+v", states)
+		}
+	})
+	t.Run("valid RRSIG → OK", func(t *testing.T) {
+		now := nowUint32()
+		data := &DelegationData{
+			ParentViews: []ParentView{{
+				Server: "p:53",
+				DSRRSIGs: []DSRRSIGObservation{{
+					Inception:  now - 3600,
+					Expiration: now + 86400,
+				}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+	t.Run("expired RRSIG → Crit", func(t *testing.T) {
+		now := nowUint32()
+		data := &DelegationData{
+			ParentViews: []ParentView{{
+				Server: "p:53",
+				DSRRSIGs: []DSRRSIGObservation{{
+					Inception:  now - 172800,
+					Expiration: now - 3600,
+				}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit for expired, got %+v", states)
+		}
+		if !strings.Contains(states[0].Message, "expired") {
+			t.Errorf("message should mention 'expired', got %q", states[0].Message)
+		}
+	})
+	t.Run("not-yet-valid RRSIG → Crit", func(t *testing.T) {
+		now := nowUint32()
+		data := &DelegationData{
+			ParentViews: []ParentView{{
+				Server: "p:53",
+				DSRRSIGs: []DSRRSIGObservation{{
+					Inception:  now + 3600,
+					Expiration: now + 172800,
+				}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit for not-yet-valid, got %+v", states)
+		}
+		if !strings.Contains(states[0].Message, "not yet valid") {
+			t.Errorf("message should mention 'not yet valid', got %q", states[0].Message)
+		}
+	})
+}
+
+// ------------------------- nsResolvableRule -------------------------
+
+func TestNSResolvableRule(t *testing.T) {
+	r := &nsResolvableRule{}
+
+	t.Run("no out-of-bailiwick NS → Info", func(t *testing.T) {
+		data := &DelegationData{
+			DelegatedFQDN: "example.com.",
+			Children: []ChildNSView{{
+				NSName: "ns1.example.com.", // in-bailiwick, must be skipped
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusInfo {
+			t.Fatalf("want Info, got %+v", states)
+		}
+	})
+	t.Run("resolve error → Crit", func(t *testing.T) {
+		data := &DelegationData{
+			DelegatedFQDN: "example.com.",
+			Children: []ChildNSView{{
+				NSName:       "ns1.elsewhere.net.",
+				ResolveError: "NXDOMAIN",
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit, got %+v", states)
+		}
+	})
+	t.Run("resolved → OK", func(t *testing.T) {
+		data := &DelegationData{
+			DelegatedFQDN: "example.com.",
+			Children: []ChildNSView{{
+				NSName:    "ns1.elsewhere.net.",
+				Addresses: []ChildAddressView{{Address: "192.0.2.1"}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+	t.Run("in-bailiwick skipped even if resolve error set", func(t *testing.T) {
+		data := &DelegationData{
+			DelegatedFQDN: "example.com.",
+			Children: []ChildNSView{{
+				NSName:       "ns1.example.com.",
+				ResolveError: "NXDOMAIN",
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		// In-bailiwick NS must be ignored; only Info state for "no out-of-bailiwick NS".
+		if states[0].Status != sdk.StatusInfo {
+			t.Fatalf("want Info (in-bailiwick skipped), got %+v", states)
+		}
+	})
+}
+
+// ------------------------- childReachableRule -------------------------
+
+func TestChildReachableRule(t *testing.T) {
+	r := &childReachableRule{}
+
+	t.Run("no child addresses → Unknown", func(t *testing.T) {
+		states := evalRule(t, r, &DelegationData{}, nil)
+		if states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown, got %+v", states)
+		}
+	})
+	t.Run("UDP error → Crit", func(t *testing.T) {
+		data := &DelegationData{
+			Children: []ChildNSView{{
+				NSName:    "ns1.example.com.",
+				Addresses: []ChildAddressView{{Address: "192.0.2.1", UDPError: "timeout"}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusCrit {
+			t.Fatalf("want Crit, got %+v", states)
+		}
+	})
+	t.Run("reachable → OK", func(t *testing.T) {
+		data := &DelegationData{
+			Children: []ChildNSView{{
+				NSName:    "ns1.example.com.",
+				Addresses: []ChildAddressView{{Address: "192.0.2.1", Authoritative: true}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+}
+
+// ------------------------- childNSMatchesParentRule -------------------------
+
+func TestChildNSMatchesParentRule(t *testing.T) {
+	r := &childNSMatchesParentRule{}
+
+	t.Run("no primary parent view → Unknown", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", UDPNSError: "timeout"}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown, got %+v", states)
+		}
+	})
+	t.Run("child NS matches parent → OK", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{
+				Server: "p:53",
+				NS:     []string{"ns1.example.com.", "ns2.example.com."},
+			}},
+			Children: []ChildNSView{{
+				NSName: "ns1.example.com.",
+				Addresses: []ChildAddressView{{
+					Address: "192.0.2.1",
+					ChildNS: []string{"ns1.example.com.", "ns2.example.com."},
+				}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+	t.Run("child NS drift → Warn", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{
+				Server: "p:53",
+				NS:     []string{"ns1.example.com.", "ns2.example.com."},
+			}},
+			Children: []ChildNSView{{
+				NSName: "ns1.example.com.",
+				Addresses: []ChildAddressView{{
+					Address: "192.0.2.1",
+					ChildNS: []string{"ns1.example.com.", "ns3.example.com."},
+				}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusWarn {
+			t.Fatalf("want Warn, got %+v", states)
+		}
+	})
+	t.Run("UDP error or NS query error → view skipped", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{
+				Server: "p:53",
+				NS:     []string{"ns1.example.com."},
+			}},
+			Children: []ChildNSView{{
+				NSName: "ns1.example.com.",
+				Addresses: []ChildAddressView{
+					{Address: "192.0.2.1", UDPError: "timeout"},
+					{Address: "192.0.2.2", ChildNSError: "refused"},
+				},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		// Both addresses must be skipped → Unknown
+		if states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown (all addresses skipped), got %+v", states)
+		}
+	})
+}
+
+// ------------------------- dnskeyQueryRule -------------------------
+
+func TestDNSKEYQueryRule(t *testing.T) {
+	r := &dnskeyQueryRule{}
+
+	t.Run("no parent DS → Unknown", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53"}},
+			Children:    []ChildNSView{{NSName: "ns1.example.com.", Addresses: []ChildAddressView{{Address: "192.0.2.1"}}}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown when no parent DS, got %+v", states)
+		}
+	})
+	t.Run("DNSKEY query error → Warn", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{{KeyTag: 1}}}},
+			Children: []ChildNSView{{
+				NSName:    "ns1.example.com.",
+				Addresses: []ChildAddressView{{Address: "192.0.2.1", DNSKEYError: "timeout"}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusWarn {
+			t.Fatalf("want Warn, got %+v", states)
+		}
+	})
+	t.Run("DNSKEY query succeeds → OK", func(t *testing.T) {
+		key := &dns.DNSKEY{
+			Hdr:   dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET},
+			Flags: 257, Protocol: 3, Algorithm: dns.RSASHA256,
+			PublicKey: "AwEAAcMnWBKLuvG/LwnPVykcmpvnntwxfshHlHRhlY0F3oz8AMcuF8gw2Ge56vG9oqVxTzHl4Ss2dEqCQOjFlOVo+pa3JwIO1lUzbQ==",
+		}
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{{KeyTag: 1}}}},
+			Children: []ChildNSView{{
+				NSName:    "ns1.example.com.",
+				Addresses: []ChildAddressView{{Address: "192.0.2.1", DNSKEYs: []DNSKEYRecord{NewDNSKEYRecord(key)}}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusOK {
+			t.Fatalf("want OK, got %+v", states)
+		}
+	})
+	t.Run("UDP error → address skipped, Unknown if no usable address", func(t *testing.T) {
+		data := &DelegationData{
+			ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{{KeyTag: 1}}}},
+			Children: []ChildNSView{{
+				NSName:    "ns1.example.com.",
+				Addresses: []ChildAddressView{{Address: "192.0.2.1", UDPError: "timeout"}},
+			}},
+		}
+		states := evalRule(t, r, data, nil)
+		if states[0].Status != sdk.StatusUnknown {
+			t.Fatalf("want Unknown (UDP error skips address), got %+v", states)
+		}
+	})
+}
+
+// ------------------------- dnskeyMatchesDSRule edge cases -------------------------
+
+func TestDNSKEYMatchesDSRule_NoDSAtParent(t *testing.T) {
+	data := &DelegationData{
+		ParentViews: []ParentView{{Server: "p:53"}}, // no DS
+		Children: []ChildNSView{{
+			NSName:    "ns1.example.com.",
+			Addresses: []ChildAddressView{{Address: "192.0.2.1"}},
+		}},
+	}
+	states := evalRule(t, (&dnskeyMatchesDSRule{}), data, nil)
+	if states[0].Status != sdk.StatusUnknown {
+		t.Fatalf("want Unknown when parent has no DS, got %+v", states)
+	}
+}
+
+func TestDNSKEYMatchesDSRule_NoKeysObserved(t *testing.T) {
+	data := &DelegationData{
+		ParentViews: []ParentView{{Server: "p:53", DS: []DSRecord{{KeyTag: 1}}}},
+		Children: []ChildNSView{{
+			NSName:    "ns1.example.com.",
+			Addresses: []ChildAddressView{{Address: "192.0.2.1", DNSKEYError: "timeout"}},
+		}},
+	}
+	states := evalRule(t, (&dnskeyMatchesDSRule{}), data, nil)
+	if states[0].Status != sdk.StatusUnknown {
+		t.Fatalf("want Unknown when no DNSKEY observed, got %+v", states)
+	}
+}
+
+// ------------------------- inBailiwickGlueRule missing-glue branch -------------------------
+
+func TestInBailiwickGlueRule_MissingGlue(t *testing.T) {
+	r := &inBailiwickGlueRule{}
+	data := &DelegationData{
+		DelegatedFQDN: "example.com.",
+		ParentViews: []ParentView{{
+			Server: "p:53",
+			NS:     []string{"ns1.example.com."},
+			Glue:   map[string][]string{}, // no glue for in-bailiwick NS
+		}},
+	}
+	states := evalRule(t, r, data, nil)
+	var sawCrit bool
+	for _, s := range states {
+		if s.Status == sdk.StatusCrit {
+			sawCrit = true
+		}
+	}
+	if !sawCrit {
+		t.Error("want Crit when in-bailiwick NS has no glue")
+	}
+}
+
+// ------------------------- unnecessaryGlueRule OK/Info branches -------------------------
+
+func TestUnnecessaryGlueRule_NoExtraGlue(t *testing.T) {
+	r := &unnecessaryGlueRule{}
+	data := &DelegationData{
+		DelegatedFQDN: "example.com.",
+		ParentViews: []ParentView{{
+			Server: "p:53",
+			NS:     []string{"ns1.elsewhere.net."},
+			Glue:   map[string][]string{}, // out-of-bailiwick with no glue
+		}},
+	}
+	states := evalRule(t, r, data, nil)
+	if len(states) != 1 || states[0].Status != sdk.StatusOK {
+		t.Fatalf("want OK for out-of-bailiwick NS without glue, got %+v", states)
+	}
+}
+
+func TestUnnecessaryGlueRule_NoOutOfBailiwickNS(t *testing.T) {
+	r := &unnecessaryGlueRule{}
+	data := &DelegationData{
+		DelegatedFQDN: "example.com.",
+		ParentViews: []ParentView{{
+			Server: "p:53",
+			NS:     []string{"ns1.example.com."},
+			Glue:   map[string][]string{"ns1.example.com.": {"192.0.2.1"}},
+		}},
+	}
+	states := evalRule(t, r, data, nil)
+	if len(states) != 1 || states[0].Status != sdk.StatusInfo {
+		t.Fatalf("want Info when all NS are in-bailiwick, got %+v", states)
+	}
+}
+
+// ------------------------- childGlueMatchesParentRule edge cases -------------------------
+
+func TestChildGlueMatchesParentRule_NoPrimary(t *testing.T) {
+	r := &childGlueMatchesParentRule{}
+	data := &DelegationData{
+		DelegatedFQDN: "example.com.",
+		ParentViews:   []ParentView{{Server: "p:53", UDPNSError: "timeout"}},
+	}
+	states := evalRule(t, r, data, nil)
+	if states[0].Status != sdk.StatusUnknown {
+		t.Fatalf("want Unknown when no primary parent view, got %+v", states)
+	}
+}
+
+func TestChildGlueMatchesParentRule_OutOfBailiwickSkipped(t *testing.T) {
+	r := &childGlueMatchesParentRule{}
+	data := &DelegationData{
+		DelegatedFQDN: "example.com.",
+		ParentViews: []ParentView{{
+			Server: "p:53",
+			NS:     []string{"ns1.elsewhere.net."},
+			Glue:   map[string][]string{},
+		}},
+		Children: []ChildNSView{{
+			NSName:    "ns1.elsewhere.net.", // out-of-bailiwick
+			Addresses: []ChildAddressView{{Address: "192.0.2.1", ChildGlueAddrs: []string{"192.0.2.99"}}},
+		}},
+	}
+	states := evalRule(t, r, data, nil)
+	// No in-bailiwick NS → no states at all (rule stays silent).
+	if len(states) != 0 {
+		t.Fatalf("want no states for out-of-bailiwick NS, got %+v", states)
+	}
+}
+
+// ------------------------- nsHasAuthoritativeAnswerRule no-children branch -------------------------
+
+func TestNSHasAuthoritativeAnswerRule_NoChildren(t *testing.T) {
+	r := &nsHasAuthoritativeAnswerRule{}
+	states := evalRule(t, r, &DelegationData{}, nil)
+	if states[0].Status != sdk.StatusUnknown {
+		t.Fatalf("want Unknown when no children, got %+v", states)
+	}
+}
+
+func TestNSHasAuthoritativeAnswerRule_NoAddresses(t *testing.T) {
+	r := &nsHasAuthoritativeAnswerRule{}
+	data := &DelegationData{
+		Children: []ChildNSView{{NSName: "ns1.example.com.", Addresses: nil}},
+	}
+	// NS with no addresses is skipped by the rule.
+	states := evalRule(t, r, data, nil)
+	if states[0].Status != sdk.StatusUnknown {
+		t.Fatalf("want Unknown when NS has no addresses, got %+v", states)
+	}
+}
+
+// ------------------------- primaryParentView -------------------------
+
+func TestPrimaryParentView(t *testing.T) {
+	t.Run("nil when all views failed", func(t *testing.T) {
+		views := []ParentView{
+			{Server: "p1:53", UDPNSError: "timeout"},
+			{Server: "p2:53", UDPNSError: "refused"},
+		}
+		if primaryParentView(views) != nil {
+			t.Error("want nil")
+		}
+	})
+	t.Run("nil when NS RRsets are empty", func(t *testing.T) {
+		views := []ParentView{{Server: "p:53", NS: []string{}}}
+		if primaryParentView(views) != nil {
+			t.Error("want nil when NS slice is empty")
+		}
+	})
+	t.Run("returns first successful view", func(t *testing.T) {
+		views := []ParentView{
+			{Server: "p1:53", UDPNSError: "timeout"},
+			{Server: "p2:53", NS: []string{"ns1.example.com."}},
+			{Server: "p3:53", NS: []string{"ns2.example.com."}},
+		}
+		got := primaryParentView(views)
+		if got == nil || got.Server != "p2:53" {
+			t.Errorf("want p2:53, got %v", got)
+		}
+	})
+	t.Run("nil for empty slice", func(t *testing.T) {
+		if primaryParentView(nil) != nil {
+			t.Error("want nil for empty slice")
+		}
+	})
 }
