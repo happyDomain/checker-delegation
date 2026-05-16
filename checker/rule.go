@@ -16,14 +16,17 @@ import (
 func Rules() []sdk.CheckRule {
 	return []sdk.CheckRule{
 		&minNameServersRule{},
+		&duplicateNSRule{},
 		&parentDiscoveredRule{},
 		&parentNSQueryRule{},
 		&parentTCPRule{},
 		&nsMatchesDeclaredRule{},
+		&parentNSConsistencyRule{},
 		&inBailiwickGlueRule{},
 		&unnecessaryGlueRule{},
 		&dsQueryRule{},
 		&dsMatchesDeclaredRule{},
+		&parentDSConsistencyRule{},
 		&dsPresentAtParentRule{},
 		&dsRRSIGValidityRule{},
 		&nsResolvableRule{},
@@ -35,6 +38,9 @@ func Rules() []sdk.CheckRule {
 		&childGlueMatchesParentRule{},
 		&dnskeyQueryRule{},
 		&dnskeyMatchesDSRule{},
+		&dnskeyKSKPresentRule{},
+		&dnskeyProtocolRule{},
+		&dsCoversAllKSKsRule{},
 		&nsHasAuthoritativeAnswerRule{},
 	}
 }
@@ -941,6 +947,306 @@ func (r *dnskeyMatchesDSRule) Evaluate(ctx context.Context, obs sdk.ObservationG
 			Status:  sdk.StatusUnknown,
 			Code:    "delegation_dnskey_no_match",
 			Message: "no DNSKEY observed at any child server",
+		}}
+	}
+	return out
+}
+
+// ------------------------- declaration checks -------------------------
+
+type duplicateNSRule struct{}
+
+func (r *duplicateNSRule) Name() string { return "delegation_duplicate_ns" }
+func (r *duplicateNSRule) Description() string {
+	return "Checks that the declared NS list contains no duplicate name server names"
+}
+func (r *duplicateNSRule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_duplicate_ns")
+	if errState != nil {
+		return errState
+	}
+	// DeclaredNS is already sorted and lowercased by normalizeNSList.
+	var dups []string
+	for i := 1; i < len(data.DeclaredNS); i++ {
+		if data.DeclaredNS[i] == data.DeclaredNS[i-1] {
+			dups = append(dups, data.DeclaredNS[i])
+		}
+	}
+	if len(dups) > 0 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusWarn,
+			Code:    "delegation_duplicate_ns",
+			Message: fmt.Sprintf("declared NS list contains duplicates: %v", dups),
+			Meta:    map[string]any{"duplicates": dups},
+		}}
+	}
+	return []sdk.CheckState{{
+		Status:  sdk.StatusOK,
+		Code:    "delegation_duplicate_ns",
+		Message: "no duplicate name server names in declared list",
+	}}
+}
+
+// ------------------------- parent-side consistency -------------------------
+
+type parentNSConsistencyRule struct{}
+
+func (r *parentNSConsistencyRule) Name() string { return "delegation_parent_ns_consistency" }
+func (r *parentNSConsistencyRule) Description() string {
+	return "Verifies that all parent authoritative servers return the same NS RRset for the delegated zone"
+}
+func (r *parentNSConsistencyRule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_parent_ns_inconsistent")
+	if errState != nil {
+		return errState
+	}
+	var valid []ParentView
+	for _, v := range data.ParentViews {
+		if v.UDPNSError == "" && len(v.NS) > 0 {
+			valid = append(valid, v)
+		}
+	}
+	if len(valid) < 2 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_parent_ns_inconsistent",
+			Message: "fewer than 2 parent servers returned an NS RRset; cross-server comparison not possible",
+		}}
+	}
+	ref := valid[0]
+	out := make([]sdk.CheckState, 0, len(valid)-1)
+	for _, v := range valid[1:] {
+		missing, extra := diffStringSets(ref.NS, v.NS)
+		st := sdk.CheckState{Code: "delegation_parent_ns_inconsistent", Subject: v.Server}
+		if len(missing) > 0 || len(extra) > 0 {
+			st.Status = sdk.StatusCrit
+			st.Message = fmt.Sprintf("NS RRset differs from %s: missing=%v extra=%v", ref.Server, missing, extra)
+			st.Meta = map[string]any{"reference": ref.Server, "missing": missing, "extra": extra}
+		} else {
+			st.Status = sdk.StatusOK
+			st.Message = fmt.Sprintf("NS RRset matches %s", ref.Server)
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+type parentDSConsistencyRule struct{}
+
+func (r *parentDSConsistencyRule) Name() string { return "delegation_parent_ds_consistency" }
+func (r *parentDSConsistencyRule) Description() string {
+	return "Verifies that all parent authoritative servers return the same DS RRset for the delegated zone"
+}
+func (r *parentDSConsistencyRule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_parent_ds_inconsistent")
+	if errState != nil {
+		return errState
+	}
+	var valid []ParentView
+	for _, v := range data.ParentViews {
+		if v.DSQueryError == "" {
+			valid = append(valid, v)
+		}
+	}
+	if len(valid) < 2 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_parent_ds_inconsistent",
+			Message: "fewer than 2 parent servers returned a DS response; cross-server comparison not possible",
+		}}
+	}
+	ref := valid[0]
+	refDS := dsRecordsToMiekg(ref.DS)
+	out := make([]sdk.CheckState, 0, len(valid)-1)
+	for _, v := range valid[1:] {
+		missing, extra := diffDS(refDS, dsRecordsToMiekg(v.DS))
+		st := sdk.CheckState{Code: "delegation_parent_ds_inconsistent", Subject: v.Server}
+		if len(missing) > 0 || len(extra) > 0 {
+			st.Status = sdk.StatusCrit
+			st.Message = fmt.Sprintf("DS RRset differs from %s: missing=%d extra=%d", ref.Server, len(missing), len(extra))
+			st.Meta = map[string]any{"reference": ref.Server, "missing": len(missing), "extra": len(extra)}
+		} else {
+			st.Status = sdk.StatusOK
+			st.Message = fmt.Sprintf("DS RRset matches %s", ref.Server)
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// ------------------------- DNSKEY integrity rules -------------------------
+
+type dnskeyKSKPresentRule struct{}
+
+func (r *dnskeyKSKPresentRule) Name() string { return "delegation_dnskey_ksk_present" }
+func (r *dnskeyKSKPresentRule) Description() string {
+	return "Verifies that at least one DNSKEY with the SEP bit set (KSK, flags=257) is present when the parent publishes DS records"
+}
+func (r *dnskeyKSKPresentRule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_dnskey_no_ksk")
+	if errState != nil {
+		return errState
+	}
+	if !parentHasAnyDS(data.ParentViews) {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_dnskey_no_ksk",
+			Message: "parent has no DS records, KSK check skipped",
+		}}
+	}
+	var out []sdk.CheckState
+	for _, c := range data.Children {
+		var keys []DNSKEYRecord
+		for _, a := range c.Addresses {
+			keys = append(keys, a.DNSKEYs...)
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		hasKSK := false
+		for _, k := range keys {
+			if k.Flags&0x0001 != 0 {
+				hasKSK = true
+				break
+			}
+		}
+		st := sdk.CheckState{Code: "delegation_dnskey_no_ksk", Subject: c.NSName}
+		if hasKSK {
+			st.Status = sdk.StatusOK
+			st.Message = "at least one KSK (SEP bit set, flags=257) found"
+		} else {
+			st.Status = sdk.StatusCrit
+			st.Message = "no KSK (SEP bit, flags=257) found among served DNSKEY records"
+		}
+		out = append(out, st)
+	}
+	if len(out) == 0 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_dnskey_no_ksk",
+			Message: "no DNSKEY records observed at any child server",
+		}}
+	}
+	return out
+}
+
+type dnskeyProtocolRule struct{}
+
+func (r *dnskeyProtocolRule) Name() string { return "delegation_dnskey_protocol" }
+func (r *dnskeyProtocolRule) Description() string {
+	return "Verifies that every DNSKEY record has Protocol=3 as required by RFC 4034 §2.1"
+}
+func (r *dnskeyProtocolRule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_dnskey_bad_protocol")
+	if errState != nil {
+		return errState
+	}
+	hasSomeKeys := false
+	var out []sdk.CheckState
+	for _, c := range data.Children {
+		// Deduplicate by public key to avoid reporting the same key once per address.
+		seen := map[string]bool{}
+		for _, a := range c.Addresses {
+			for _, k := range a.DNSKEYs {
+				hasSomeKeys = true
+				if seen[k.PublicKey] {
+					continue
+				}
+				seen[k.PublicKey] = true
+				if k.Protocol != 3 {
+					out = append(out, sdk.CheckState{
+						Status:  sdk.StatusCrit,
+						Code:    "delegation_dnskey_bad_protocol",
+						Subject: fmt.Sprintf("keytag=%d@%s", k.ToMiekg().KeyTag(), c.NSName),
+						Message: fmt.Sprintf("DNSKEY has Protocol=%d, must be 3 (RFC 4034 §2.1)", k.Protocol),
+						Meta:    map[string]any{"protocol": k.Protocol},
+					})
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		if !hasSomeKeys {
+			return []sdk.CheckState{{
+				Status:  sdk.StatusUnknown,
+				Code:    "delegation_dnskey_bad_protocol",
+				Message: "no DNSKEY records observed",
+			}}
+		}
+		return []sdk.CheckState{{
+			Status:  sdk.StatusOK,
+			Code:    "delegation_dnskey_bad_protocol",
+			Message: "all DNSKEY records have Protocol=3",
+		}}
+	}
+	return out
+}
+
+type dsCoversAllKSKsRule struct{}
+
+func (r *dsCoversAllKSKsRule) Name() string { return "delegation_dnskey_ksk_uncovered" }
+func (r *dsCoversAllKSKsRule) Description() string {
+	return "Verifies that every KSK (SEP bit set) served by the child has a corresponding DS record at the parent"
+}
+func (r *dsCoversAllKSKsRule) Evaluate(ctx context.Context, obs sdk.ObservationGetter, opts sdk.CheckerOptions) []sdk.CheckState {
+	data, errState := loadData(ctx, obs, "delegation_dnskey_ksk_uncovered")
+	if errState != nil {
+		return errState
+	}
+	if !parentHasAnyDS(data.ParentViews) {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_dnskey_ksk_uncovered",
+			Message: "parent has no DS records, KSK coverage check skipped",
+		}}
+	}
+	var parentDS []*dns.DS
+	for _, v := range data.ParentViews {
+		if len(v.DS) > 0 {
+			parentDS = dsRecordsToMiekg(v.DS)
+			break
+		}
+	}
+	var out []sdk.CheckState
+	for _, c := range data.Children {
+		// Collect unique KSKs across all addresses of this NS, keyed by public key.
+		kskByKey := map[string]*dns.DNSKEY{}
+		for _, a := range c.Addresses {
+			for _, k := range a.DNSKEYs {
+				if k.Flags&0x0001 != 0 {
+					mk := k.ToMiekg()
+					kskByKey[mk.PublicKey] = mk
+				}
+			}
+		}
+		for _, ksk := range kskByKey {
+			covered := false
+			for _, d := range parentDS {
+				expected := ksk.ToDS(d.DigestType)
+				if expected != nil && dsEqual(expected, d) {
+					covered = true
+					break
+				}
+			}
+			st := sdk.CheckState{
+				Code:    "delegation_dnskey_ksk_uncovered",
+				Subject: fmt.Sprintf("keytag=%d@%s", ksk.KeyTag(), c.NSName),
+			}
+			if covered {
+				st.Status = sdk.StatusOK
+				st.Message = "KSK has a matching DS record at the parent"
+			} else {
+				st.Status = sdk.StatusCrit
+				st.Message = "KSK has no matching DS record at the parent"
+			}
+			out = append(out, st)
+		}
+	}
+	if len(out) == 0 {
+		return []sdk.CheckState{{
+			Status:  sdk.StatusUnknown,
+			Code:    "delegation_dnskey_ksk_uncovered",
+			Message: "no KSK observed at any child server",
 		}}
 	}
 	return out
