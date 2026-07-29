@@ -4,7 +4,7 @@ CHECKER_VERSION ?= custom-build
 
 CHECKER_SOURCES := main.go $(wildcard checker/*.go)
 
-GO_LDFLAGS := -X main.Version=$(CHECKER_VERSION)
+GO_LDFLAGS := -s -w -X main.Version=$(CHECKER_VERSION)
 
 .PHONY: all plugin docker test clean
 
@@ -16,7 +16,7 @@ $(CHECKER_NAME): $(CHECKER_SOURCES)
 plugin: $(CHECKER_NAME).so
 
 $(CHECKER_NAME).so: $(CHECKER_SOURCES) $(wildcard plugin/*.go)
-	go build -buildmode=plugin -ldflags "$(GO_LDFLAGS)" -o $@ ./plugin/
+	go build -buildmode=plugin -trimpath -tags netgo -ldflags "$(GO_LDFLAGS)" -o $@ ./plugin/
 
 docker:
 	docker build --build-arg CHECKER_VERSION=$(CHECKER_VERSION) -t $(CHECKER_IMAGE) .

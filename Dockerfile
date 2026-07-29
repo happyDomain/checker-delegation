@@ -6,7 +6,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -tags standalone -ldflags "-X main.Version=${CHECKER_VERSION}" -o /checker-delegation .
+RUN CGO_ENABLED=0 go build -tags standalone -trimpath -ldflags "-s -w -X main.Version=${CHECKER_VERSION}" -o /checker-delegation .
 
 FROM scratch
 COPY --from=builder /checker-delegation /checker-delegation
